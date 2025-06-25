@@ -4,10 +4,22 @@ import torch
 from torchvision import transforms
 from random_erasing import RandomErasing
 import warnings
-from decord import VideoReader, cpu
 from torch.utils.data import Dataset
 import video_transforms as video_transforms 
 import volume_transforms as volume_transforms
+import cv2
+
+# Handle decord import gracefully
+try:
+    import decord
+    from decord import VideoReader, cpu
+    HAS_DECORD = True
+    print("Using decord for video loading")
+except ImportError:
+    print("Warning: decord not available, using OpenCV for video loading")
+    HAS_DECORD = False
+    VideoReader = None
+    cpu = None
 
 
 class SSVideoClsDataset(Dataset):
@@ -37,8 +49,8 @@ class SSVideoClsDataset(Dataset):
             self.aug = True
             if self.args.reprob > 0:
                 self.rand_erase = True
-        if VideoReader is None:
-            raise ImportError("Unable to import `decord` which is required to read videos.")
+        if not HAS_DECORD:
+            print("Warning: Using OpenCV for video loading (slower than decord but functional)")
 
         import pandas as pd
         cleaned = pd.read_csv(self.anno_path, header=None, delimiter=' ')
@@ -215,7 +227,7 @@ class SSVideoClsDataset(Dataset):
 
 
     def loadvideo_decord(self, sample, sample_rate_scale=1):
-        """Load video content using Decord"""
+        """Load video content using Decord with PyAV fallback"""
         fname = sample
 
         if not (os.path.exists(fname)):
@@ -225,15 +237,19 @@ class SSVideoClsDataset(Dataset):
         if os.path.getsize(fname) < 1 * 1024:
             print('SKIP: ', fname, " - ", os.path.getsize(fname))
             return []
+        
+        # First try decord
         try:
             if self.keep_aspect_ratio:
                 vr = VideoReader(fname, num_threads=1, ctx=cpu(0))
             else:
                 vr = VideoReader(fname, width=self.new_width, height=self.new_height,
                                  num_threads=1, ctx=cpu(0))
-        except:
-            print("video cannot be loaded by decord: ", fname)
-            return []
+        except Exception as e:
+            print(f"video cannot be loaded by decord: {fname} - {e}")
+            print(f"Trying PyAV fallback for: {fname}")
+            # Fallback to PyAV
+            return self.loadvideo_pyav_fallback(sample, sample_rate_scale)
 
         if self.mode == 'test':
             all_index = []
@@ -244,8 +260,13 @@ class SSVideoClsDataset(Dataset):
                 all_index.append(all_index[-1])
             all_index = list(np.sort(np.array(all_index))) 
             vr.seek(0)
-            buffer = vr.get_batch(all_index).asnumpy()
-            return buffer
+            try:
+                buffer = vr.get_batch(all_index).asnumpy()
+                return buffer
+            except Exception as e:
+                print(f"Error decoding frames with decord: {fname} - {e}")
+                print(f"Trying PyAV fallback for: {fname}")
+                return self.loadvideo_pyav_fallback(sample, sample_rate_scale)
 
         # handle temporal segments
         average_duration = len(vr) // self.num_segment
@@ -259,8 +280,133 @@ class SSVideoClsDataset(Dataset):
             all_index += list(np.zeros((self.num_segment,)))
         all_index = list(np.array(all_index)) 
         vr.seek(0)
-        buffer = vr.get_batch(all_index).asnumpy()
-        return buffer
+        try:
+            buffer = vr.get_batch(all_index).asnumpy()
+            return buffer
+        except Exception as e:
+            print(f"Error decoding frames with decord: {fname} - {e}")
+            print(f"Trying PyAV fallback for: {fname}")
+            return self.loadvideo_pyav_fallback(sample, sample_rate_scale)
+
+    def loadvideo_pyav_fallback(self, sample, sample_rate_scale=1):
+        """PyAV fallback for when decord fails"""
+        fname = sample
+        
+        try:
+            import av
+            
+            # Open video container
+            container = av.open(fname)
+            if not container.streams.video:
+                print(f"No video stream found in: {fname}")
+                container.close()
+                return []
+                
+            stream = container.streams.video[0]
+            
+            # Get total frame count
+            frame_count = stream.frames
+            if frame_count == 0 or frame_count is None:
+                # Fallback: estimate from duration and fps
+                if stream.duration and stream.average_rate:
+                    frame_count = int(stream.duration * stream.average_rate / stream.time_base)
+                else:
+                    # Count frames manually if needed (slower but more reliable)
+                    frame_count = sum(1 for _ in container.decode(video=0))
+                    container.seek(0)
+            
+            if frame_count <= 0:
+                print(f"Invalid frame count for: {fname}")
+                container.close()
+                return []
+            
+            # Calculate sampling parameters based on mode (SSV2-specific logic)
+            if self.mode == 'test':
+                # SSV2 test mode sampling
+                tick = frame_count / float(self.num_segment)
+                frame_indices = [int(tick / 2.0 + tick * x) for x in range(self.num_segment)] + \
+                               [int(tick * x) for x in range(self.num_segment)]
+                while len(frame_indices) < (self.num_segment * self.test_num_segment):
+                    frame_indices.append(frame_indices[-1])
+                frame_indices = sorted(frame_indices)
+            else:
+                # SSV2 train/val mode sampling
+                average_duration = frame_count // self.num_segment
+                frame_indices = []
+                if average_duration > 0:
+                    frame_indices = [avg_dur * i + np.random.randint(average_duration) 
+                                   for i, avg_dur in enumerate([average_duration] * self.num_segment)]
+                elif frame_count > self.num_segment:
+                    frame_indices = sorted(np.random.randint(frame_count, size=self.num_segment))
+                else:
+                    frame_indices = [0] * self.num_segment
+                frame_indices = [int(idx) for idx in frame_indices]
+            
+            # Decode frames
+            frames = []
+            frame_idx = 0
+            target_indices = set(frame_indices)
+            max_target = max(frame_indices) if frame_indices else 0
+            
+            # Use a more efficient seeking strategy
+            container.seek(0)
+            
+            for frame in container.decode(video=0):
+                if frame_idx in target_indices:
+                    try:
+                        # Convert frame to numpy array
+                        img = frame.to_rgb().to_ndarray()
+                        
+                        # Resize if needed to match decord behavior
+                        if not self.keep_aspect_ratio:
+                            from PIL import Image
+                            pil_img = Image.fromarray(img)
+                            pil_img = pil_img.resize((self.new_width, self.new_height), Image.BILINEAR)
+                            img = np.array(pil_img)
+                        
+                        frames.append(img)
+                        target_indices.remove(frame_idx)
+                        
+                        # Stop if we've collected all frames
+                        if not target_indices:
+                            break
+                    except Exception as e:
+                        print(f"Error converting frame {frame_idx} in {fname}: {e}")
+                        # Continue to next frame
+                        target_indices.discard(frame_idx)
+                
+                frame_idx += 1
+                
+                # Stop if we've gone past all target frames
+                if frame_idx > max_target:
+                    break
+            
+            container.close()
+            
+            # Fill missing frames by duplicating the last frame or creating black frames
+            target_length = len(frame_indices)
+            while len(frames) < target_length:
+                if frames:
+                    frames.append(frames[-1].copy())
+                else:
+                    # Create a black frame as fallback
+                    if self.keep_aspect_ratio:
+                        h, w = self.new_height, self.new_width
+                    else:
+                        h, w = self.new_height, self.new_width
+                    frames.append(np.zeros((h, w, 3), dtype=np.uint8))
+            
+            if frames:
+                buffer = np.array(frames)
+                print(f"Successfully loaded {len(frames)} frames using PyAV fallback for: {fname}")
+                return buffer
+            else:
+                print(f"No frames could be decoded from: {fname}")
+                return []
+                
+        except Exception as e:
+            print(f"PyAV fallback also failed for {fname}: {e}")
+            return []
 
     def __len__(self):
         if self.mode != 'test':

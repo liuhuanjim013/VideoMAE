@@ -12,8 +12,14 @@ from pathlib import Path
 import subprocess
 import torch
 import torch.distributed as dist
-from torch._six import inf
 import random
+
+# Handle torch._six compatibility for newer PyTorch versions
+try:
+    from torch._six import inf
+except ImportError:
+    # torch._six was removed in newer PyTorch versions
+    inf = float('inf')
 
 from tensorboardX import SummaryWriter
 

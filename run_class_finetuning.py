@@ -188,6 +188,16 @@ def get_args():
 
     parser.add_argument('--enable_deepspeed', action='store_true', default=False)
 
+    # Weights & Biases parameters
+    parser.add_argument('--use_wandb', action='store_true', default=False,
+                        help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb_project', default='videomae-finetuning', type=str,
+                        help='wandb project name')
+    parser.add_argument('--wandb_entity', default=None, type=str,
+                        help='wandb entity (team/user)')
+    parser.add_argument('--wandb_run_name', default=None, type=str,
+                        help='wandb run name (auto-generated if not specified)')
+
     known_args, _ = parser.parse_known_args()
 
     if known_args.enable_deepspeed:
@@ -223,6 +233,36 @@ def main(args, ds_init):
 
     cudnn.benchmark = True
 
+    # Initialize Weights & Biases if enabled
+    wandb_logger = None
+    if args.use_wandb and utils.is_main_process():
+        try:
+            from wandb_logger import WandbLogger
+            wandb_logger = WandbLogger(args, model=None)  # Will set model later
+        except ImportError:
+            print("⚠️  wandb_logger.py not found, using basic wandb integration")
+            try:
+                import wandb
+                
+                # Auto-generate run name if not provided
+                if args.wandb_run_name is None:
+                    args.wandb_run_name = f"{args.model}_{args.data_set}_bs{args.batch_size}_lr{args.lr}_ep{args.epochs}"
+                
+                wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=args.wandb_run_name,
+                    config=vars(args),
+                    resume='allow'
+                )
+                print(f"✅ Weights & Biases initialized: {wandb.run.url}")
+            except ImportError:
+                print("⚠️  wandb not available, install with: pip install wandb")
+                args.use_wandb = False
+            except Exception as e:
+                print(f"⚠️  Failed to initialize wandb: {e}")
+                args.use_wandb = False
+
     dataset_train, args.nb_classes = build_dataset(is_train=True, test_mode=False, args=args)
     if args.disable_eval_during_finetuning:
         dataset_val = None
@@ -248,6 +288,7 @@ def main(args, ds_init):
             dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False)
     else:
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_test = torch.utils.data.SequentialSampler(dataset_test)
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
@@ -326,7 +367,17 @@ def main(args, ds_init):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.finetune, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
+            # Handle safetensors format
+            if args.finetune.endswith('.safetensors'):
+                try:
+                    from safetensors.torch import load_file
+                    checkpoint = load_file(args.finetune)
+                except ImportError:
+                    print("SafeTensors not available, please install with: pip install safetensors")
+                    raise
+            else:
+                # Set weights_only=False for compatibility with older checkpoint formats
+                checkpoint = torch.load(args.finetune, map_location='cpu', weights_only=False)
 
         print("Load ckpt from %s" % args.finetune)
         checkpoint_model = None
@@ -480,11 +531,26 @@ def main(args, ds_init):
             print("Start merging results...")
             final_top1 ,final_top5 = merge(args.output_dir, num_tasks)
             print(f"Accuracy of the network on the {len(dataset_test)} test videos: Top-1: {final_top1:.2f}%, Top-5: {final_top5:.2f}%")
-            log_stats = {'Final top-1': final_top1,
-                        'Final Top-5': final_top5}
-            if args.output_dir and utils.is_main_process():
-                with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                    f.write(json.dumps(log_stats) + "\n")
+        log_stats = {'Final top-1': final_top1,
+                    'Final Top-5': final_top5}
+        
+        # Log final results to wandb
+        if args.use_wandb and wandb_logger is not None and utils.is_main_process():
+            if hasattr(wandb_logger, 'log_final_results'):
+                wandb_logger.log_final_results(final_top1, final_top5)
+                wandb_logger.finish()
+            else:
+                # Fallback to basic wandb
+                import wandb
+                wandb.log({
+                    'test/final_top1': final_top1,
+                    'test/final_top5': final_top5,
+                })
+                wandb.finish()
+        
+        if args.output_dir and utils.is_main_process():
+            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+                f.write(json.dumps(log_stats) + "\n")
         exit(0)
         
 
@@ -496,13 +562,18 @@ def main(args, ds_init):
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
+        current_global_step = epoch * num_training_steps_per_epoch
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer,
             device, epoch, loss_scaler, args.clip_grad, model_ema, mixup_fn,
-            log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
+            log_writer=log_writer, start_steps=current_global_step,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
             num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
+            wandb_logger=wandb_logger
         )
+        # Update wandb step counter to match training
+        if wandb_logger and wandb_logger.enabled:
+            wandb_logger.step_count = current_global_step + num_training_steps_per_epoch
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
@@ -523,6 +594,27 @@ def main(args, ds_init):
                 log_writer.update(val_acc1=test_stats['acc1'], head="perf", step=epoch)
                 log_writer.update(val_acc5=test_stats['acc5'], head="perf", step=epoch)
                 log_writer.update(val_loss=test_stats['loss'], head="perf", step=epoch)
+
+            # Log to wandb
+            if args.use_wandb and wandb_logger is not None and utils.is_main_process():
+                if hasattr(wandb_logger, 'log_validation'):
+                    # Use new WandbLogger
+                    wandb_logger.log_validation(test_stats, epoch, max_accuracy)
+                else:
+                    # Fallback to basic wandb - use synchronized step
+                    import wandb
+                    validation_step = current_global_step + num_training_steps_per_epoch
+                    wandb_log = {
+                        'epoch': epoch,
+                        'train/loss': train_stats.get('loss', 0),
+                        'train/class_acc': train_stats.get('class_acc', 0),
+                        'train/lr': train_stats.get('lr', 0),
+                        'val/acc1': test_stats['acc1'],
+                        'val/acc5': test_stats['acc5'],
+                        'val/loss': test_stats['loss'],
+                        'val/max_accuracy': max_accuracy,
+                    }
+                    wandb.log(wandb_log, step=validation_step)
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'val_{k}': v for k, v in test_stats.items()},

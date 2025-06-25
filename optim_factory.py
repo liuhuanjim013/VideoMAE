@@ -6,11 +6,19 @@ from timm.optim.adahessian import Adahessian
 from timm.optim.adamp import AdamP
 from timm.optim.lookahead import Lookahead
 from timm.optim.nadam import Nadam
-from timm.optim.novograd import NovoGrad
-from timm.optim.nvnovograd import NvNovoGrad
 from timm.optim.radam import RAdam
 from timm.optim.rmsprop_tf import RMSpropTF
 from timm.optim.sgdp import SGDP
+
+# Handle NovoGrad import for different timm versions
+try:
+    from timm.optim.novograd import NovoGrad
+    from timm.optim.nvnovograd import NvNovoGrad
+except ImportError:
+    # Fallback for newer timm versions or if NovoGrad is not available
+    print("Warning: NovoGrad not available in this timm version, using AdamW as fallback")
+    NovoGrad = None
+    NvNovoGrad = None
 
 import json
 
@@ -146,9 +154,17 @@ def create_optimizer(args, model, get_num_layer=None, get_layer_scale=None, filt
     elif opt_lower == 'rmsproptf':
         optimizer = RMSpropTF(parameters, alpha=0.9, momentum=args.momentum, **opt_args)
     elif opt_lower == 'novograd':
-        optimizer = NovoGrad(parameters, **opt_args)
+        if NovoGrad is not None:
+            optimizer = NovoGrad(parameters, **opt_args)
+        else:
+            print("Warning: NovoGrad not available, falling back to AdamW")
+            optimizer = optim.AdamW(parameters, **opt_args)
     elif opt_lower == 'nvnovograd':
-        optimizer = NvNovoGrad(parameters, **opt_args)
+        if NvNovoGrad is not None:
+            optimizer = NvNovoGrad(parameters, **opt_args)
+        else:
+            print("Warning: NvNovoGrad not available, falling back to AdamW")
+            optimizer = optim.AdamW(parameters, **opt_args)
     elif opt_lower == 'fusedsgd':
         opt_args.pop('eps', None)
         optimizer = FusedSGD(parameters, momentum=args.momentum, nesterov=True, **opt_args)

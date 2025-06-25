@@ -26,7 +26,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None, log_writer=None,
                     start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None):
+                    num_training_steps_per_epoch=None, update_freq=None, wandb_logger=None):
     model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -133,6 +133,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             log_writer.update(grad_norm=grad_norm, head="opt")
 
             log_writer.set_step()
+
+        # Log to wandb every 50 steps for real-time monitoring
+        if wandb_logger and wandb_logger.enabled and data_iter_step % 50 == 0:
+            wandb_logger.log_training_step(metric_logger, epoch, data_iter_step, 
+                                         global_step=start_steps + data_iter_step)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

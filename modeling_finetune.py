@@ -287,6 +287,8 @@ class VisionTransformer(nn.Module):
 
 @register_model
 def vit_small_patch16_224(pretrained=False, **kwargs):
+    # Filter out pretrained_cfg which newer timm versions pass but our VisionTransformer doesn't expect
+    kwargs.pop('pretrained_cfg', None)
     model = VisionTransformer(
         patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -296,6 +298,8 @@ def vit_small_patch16_224(pretrained=False, **kwargs):
 
 @register_model
 def vit_base_patch16_224(pretrained=False, **kwargs):
+    # Filter out pretrained_cfg which newer timm versions pass but our VisionTransformer doesn't expect
+    kwargs.pop('pretrained_cfg', None)
     model = VisionTransformer(
         patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
