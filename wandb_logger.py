@@ -75,9 +75,14 @@ class WandbLogger:
         metrics['epoch'] = epoch
         metrics['step'] = step
         
-        # Use provided global_step or increment internal counter
-        log_step = global_step if global_step is not None else self.step_count
-        self.step_count += 1
+        # Always use provided global_step when available, ensure monotonic steps
+        if global_step is not None:
+            log_step = global_step
+            # Force step_count to be monotonically increasing
+            self.step_count = max(self.step_count, global_step + 1)
+        else:
+            log_step = self.step_count
+            self.step_count += 1
         
         # Add GPU memory usage if available
         if hasattr(metric_logger, '_get_memory_usage'):

@@ -571,8 +571,9 @@ def main(args, ds_init):
             num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
             wandb_logger=wandb_logger
         )
-        # Update wandb step counter to match training
+        # Update wandb step counter to match training progress
         if wandb_logger and wandb_logger.enabled:
+            # Set step counter to end of current epoch
             wandb_logger.step_count = current_global_step + num_training_steps_per_epoch
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:

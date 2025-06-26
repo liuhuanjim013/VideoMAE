@@ -136,8 +136,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         # Log to wandb every 50 steps for real-time monitoring
         if wandb_logger and wandb_logger.enabled and data_iter_step % 50 == 0:
+            # Use 'it' which is the correct global step accounting for gradient accumulation
             wandb_logger.log_training_step(metric_logger, epoch, data_iter_step, 
-                                         global_step=start_steps + data_iter_step)
+                                         global_step=it)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
