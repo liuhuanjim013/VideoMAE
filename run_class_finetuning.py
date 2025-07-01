@@ -83,6 +83,19 @@ def get_args():
     parser.add_argument('--warmup_steps', type=int, default=-1, metavar='N',
                         help='num of steps to warmup LR, will overload warmup_epochs if set > 0')
 
+    # Curriculum Learning LR schedules
+    parser.add_argument('--lr_schedule_type', type=str, default='cosine', 
+                        choices=['cosine', 'fixed', 'intra_episode'],
+                        help='Learning rate schedule type: cosine (default), fixed (constant after warmup), intra_episode (decay within each epoch)')
+    parser.add_argument('--intra_episode_decay_factor', type=float, default=0.1,
+                        help='For intra_episode schedule: final_lr = lr * decay_factor (default: 0.1)')
+
+    # Sample ordering control
+    parser.add_argument('--shuffle_data', action='store_true', default=False,
+                        help='Shuffle training data (True for traditional random order, False for fixed/curriculum order)')
+    parser.add_argument('--fixed_sample_order', action='store_true', default=False,
+                        help='Use fixed sample order for curriculum learning (opposite of --shuffle_data, for backward compatibility)')
+
     # Augmentation parameters
     parser.add_argument('--color_jitter', type=float, default=0.4, metavar='PCT',
                         help='Color jitter factor (default: 0.4)')
@@ -240,7 +253,7 @@ def main(args, ds_init):
             from wandb_logger import WandbLogger
             wandb_logger = WandbLogger(args, model=None)  # Will set model later
         except ImportError:
-            print("⚠️  wandb_logger.py not found, using basic wandb integration")
+            print("  wandb_logger.py not found, using basic wandb integration")
             try:
                 import wandb
                 
@@ -255,12 +268,12 @@ def main(args, ds_init):
                     config=vars(args),
                     resume='allow'
                 )
-                print(f"✅ Weights & Biases initialized: {wandb.run.url}")
+                print(f" Weights & Biases initialized: {wandb.run.url}")
             except ImportError:
-                print("⚠️  wandb not available, install with: pip install wandb")
+                print("  wandb not available, install with: pip install wandb")
                 args.use_wandb = False
             except Exception as e:
-                print(f"⚠️  Failed to initialize wandb: {e}")
+                print(f"  Failed to initialize wandb: {e}")
                 args.use_wandb = False
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, test_mode=False, args=args)
@@ -273,8 +286,22 @@ def main(args, ds_init):
 
     num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
+    
+    # Determine shuffle behavior based on arguments
+    # Priority: --shuffle_data flag > --fixed_sample_order flag > default (False for curriculum learning)
+    if args.shuffle_data:
+        use_shuffle = True
+        print("Using RANDOM sample order (traditional training)")
+    elif args.fixed_sample_order:
+        use_shuffle = False
+        print("Using FIXED sample order (curriculum learning)")
+    else:
+        # Default: False (fixed order for curriculum learning)
+        use_shuffle = False
+        print("Using FIXED sample order (default for curriculum learning)")
+    
     sampler_train = torch.utils.data.DistributedSampler(
-        dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=False
+        dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=use_shuffle
     )
     print("Sampler_train = %s" % str(sampler_train))
     if args.dist_eval:
@@ -499,10 +526,29 @@ def main(args, ds_init):
         loss_scaler = NativeScaler()
 
     print("Use step level LR scheduler!")
-    lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
-        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
-    )
+    
+    # Choose LR scheduler based on curriculum learning setup
+    if args.lr_schedule_type == 'cosine':
+        lr_schedule_values = utils.cosine_scheduler(
+            args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+            warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+        )
+    elif args.lr_schedule_type == 'fixed':
+        lr_schedule_values = utils.fixed_scheduler(
+            args.lr, args.epochs, num_training_steps_per_epoch,
+            warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+            start_warmup_value=args.warmup_lr
+        )
+    elif args.lr_schedule_type == 'intra_episode':
+        # For intra-episode decay: decay within each epoch
+        final_lr = args.lr * args.intra_episode_decay_factor
+        lr_schedule_values = utils.intra_episode_scheduler(
+            args.lr, final_lr, args.epochs, num_training_steps_per_epoch,
+            warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
+            start_warmup_value=args.warmup_lr
+        )
+    else:
+        raise ValueError(f"Unknown lr_schedule_type: {args.lr_schedule_type}")
     if args.weight_decay_end is None:
         args.weight_decay_end = args.weight_decay
     wd_schedule_values = utils.cosine_scheduler(

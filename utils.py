@@ -408,6 +408,66 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     return schedule
 
 
+def fixed_scheduler(base_value, epochs, niter_per_ep, warmup_epochs=0, 
+                   start_warmup_value=0, warmup_steps=-1):
+    """
+    Fixed learning rate scheduler for curriculum learning.
+    After warmup, LR stays constant at base_value.
+    """
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_steps > 0:
+        warmup_iters = warmup_steps
+    print("Set warmup steps = %d" % warmup_iters)
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    # Fixed LR after warmup
+    remaining_iters = epochs * niter_per_ep - warmup_iters
+    fixed_schedule = np.full(remaining_iters, base_value)
+    
+    schedule = np.concatenate((warmup_schedule, fixed_schedule))
+    
+    assert len(schedule) == epochs * niter_per_ep
+    print(f"Using Fixed LR scheduler: warmup to {base_value}, then constant")
+    return schedule
+
+
+def intra_episode_scheduler(base_value, final_value, epochs, niter_per_ep, 
+                           warmup_epochs=0, start_warmup_value=0, warmup_steps=-1):
+    """
+    Intra-episode learning rate scheduler for curriculum learning.
+    LR decays within each episode (from easy to hard samples).
+    """
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_steps > 0:
+        warmup_iters = warmup_steps
+    print("Set warmup steps = %d" % warmup_iters)
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    # Create intra-episode decay pattern
+    main_schedule = []
+    remaining_epochs = epochs - warmup_epochs
+    
+    for epoch in range(remaining_epochs):
+        # Within each episode: cosine decay from base_value to final_value
+        episode_schedule = np.array([
+            final_value + 0.5 * (base_value - final_value) * 
+            (1 + math.cos(math.pi * step / (niter_per_ep - 1)))
+            for step in range(niter_per_ep)
+        ])
+        main_schedule.extend(episode_schedule)
+    
+    main_schedule = np.array(main_schedule)
+    schedule = np.concatenate((warmup_schedule, main_schedule))
+    
+    assert len(schedule) == epochs * niter_per_ep
+    print(f"Using Intra-Episode LR scheduler: {base_value} -> {final_value} within each episode")
+    return schedule
+
+
 def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
