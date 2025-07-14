@@ -54,7 +54,22 @@ class VideoClsDataset(Dataset):
             print("Warning: Using OpenCV for video loading (slower than decord but functional)")
 
         import pandas as pd
-        cleaned = pd.read_csv(self.anno_path, header=None, delimiter=' ')
+        # Try both delimiters and check which one gives us 2 columns
+        try:
+            cleaned_space = pd.read_csv(self.anno_path, header=None, delimiter=' ')
+            if cleaned_space.shape[1] == 2:
+                cleaned = cleaned_space
+                print(f"Using space delimiter for {self.anno_path}")
+            else:
+                cleaned = pd.read_csv(self.anno_path, header=None, delimiter=',')
+                print(f"Using comma delimiter for {self.anno_path}")
+        except:
+            cleaned = pd.read_csv(self.anno_path, header=None, delimiter=',')
+            print(f"Using comma delimiter for {self.anno_path}")
+        
+        print(f"CSV shape: {cleaned.shape}, columns: {cleaned.columns}")
+        print(f"First few rows: {cleaned.head()}")
+        
         self.dataset_samples = list(cleaned.values[:, 0])
         self.label_array = list(cleaned.values[:, 1])
 

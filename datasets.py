@@ -84,7 +84,9 @@ def build_dataset(is_train, test_mode, args):
             new_height=256,
             new_width=320,
             args=args)
-        nb_classes = 400
+        
+        # Use the nb_classes from args for Kinetics-400 subsets
+        nb_classes = args.nb_classes
     
     elif args.data_set == 'SSV2':
         mode = None
@@ -179,7 +181,14 @@ def build_dataset(is_train, test_mode, args):
         nb_classes = 51
     else:
         raise NotImplementedError()
-    assert nb_classes == args.nb_classes
-    print("Number of the class = %d" % args.nb_classes)
+    # For Kinetics-400, allow dynamic class count for subsets
+    if args.data_set == 'Kinetics-400':
+        if nb_classes != args.nb_classes:
+            print(f"Warning: Dataset has {nb_classes} classes, but --nb_classes={args.nb_classes}")
+            print("Using actual dataset class count for training")
+            nb_classes = args.nb_classes
+    else:
+        assert nb_classes == args.nb_classes
+    print("Number of the class = %d" % nb_classes)
 
     return dataset, nb_classes

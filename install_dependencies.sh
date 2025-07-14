@@ -74,16 +74,107 @@ install_system_dependencies() {
     print_status "System dependencies installed successfully!"
 }
 
+# Install Miniconda if not already available
+install_miniconda() {
+    print_status "Checking for conda installation..."
+    
+    # Check if conda command is available
+    if command -v conda &> /dev/null; then
+        print_status "Conda is already installed and available in PATH."
+        return 0
+    fi
+    
+    # Check if Miniconda directory already exists
+    if [[ -d "$HOME/miniconda3" ]]; then
+        print_status "Miniconda directory already exists at $HOME/miniconda3"
+        print_status "Adding to PATH and initializing..."
+        
+        # Add to PATH for current session
+        export PATH="$HOME/miniconda3/bin:$PATH"
+        
+        # Initialize conda if not already done
+        if [[ ! -f "$HOME/.bashrc" ]] || ! grep -q "miniconda3" "$HOME/.bashrc"; then
+            print_status "Initializing conda..."
+            "$HOME/miniconda3/bin/conda" init bash
+        fi
+        
+        # Source the conda script
+        if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+            source "$HOME/miniconda3/etc/profile.d/conda.sh"
+        fi
+        
+        print_status "✅ Using existing Miniconda installation."
+        return 0
+    fi
+    
+    print_status "Conda not found. Installing Miniconda..."
+    
+    # Detect architecture
+    ARCH=$(uname -m)
+    OS=$(uname -s)
+    
+    # Determine the correct Miniconda installer URL
+    if [[ "$OS" == "Linux" ]]; then
+        if [[ "$ARCH" == "x86_64" ]]; then
+            MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+        elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+            MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh"
+        else
+            print_error "Unsupported architecture: $ARCH"
+            exit 1
+        fi
+    elif [[ "$OS" == "Darwin" ]]; then
+        if [[ "$ARCH" == "x86_64" ]]; then
+            MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
+        elif [[ "$ARCH" == "arm64" ]]; then
+            MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
+        else
+            print_error "Unsupported architecture: $ARCH"
+            exit 1
+        fi
+    else
+        print_error "Unsupported operating system: $OS"
+        exit 1
+    fi
+    
+    # Download Miniconda installer
+    MINICONDA_INSTALLER="/tmp/miniconda_installer.sh"
+    print_status "Downloading Miniconda installer for $OS-$ARCH..."
+    
+    if ! wget -O "$MINICONDA_INSTALLER" "$MINICONDA_URL"; then
+        if ! curl -o "$MINICONDA_INSTALLER" "$MINICONDA_URL"; then
+            print_error "Failed to download Miniconda installer. Please check your internet connection."
+            exit 1
+        fi
+    fi
+    
+    # Install Miniconda
+    print_status "Installing Miniconda..."
+    bash "$MINICONDA_INSTALLER" -b -p "$HOME/miniconda3"
+    
+    # Clean up installer
+    rm -f "$MINICONDA_INSTALLER"
+    
+    # Initialize conda
+    print_status "Initializing conda..."
+    "$HOME/miniconda3/bin/conda" init bash
+    
+    # Add conda to PATH for current session
+    export PATH="$HOME/miniconda3/bin:$PATH"
+    
+    # Source the conda script to make it available
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    
+    print_status "Miniconda installed successfully!"
+    print_warning "Note: You may need to restart your terminal or run 'source ~/.bashrc' after installation."
+}
+
 # Setup conda environment
 setup_conda_environment() {
     print_status "Setting up conda environment 'videomae'..."
     
-    # Check if conda is installed
-    if ! command -v conda &> /dev/null; then
-        print_error "Conda is not installed. Please install Miniconda or Anaconda first."
-        print_status "You can install Miniconda from: https://docs.conda.io/en/latest/miniconda.html"
-        exit 1
-    fi
+    # Ensure conda is available (install if needed)
+    install_miniconda
     
     # Check if environment already exists
     if conda env list | grep -q "videomae"; then
@@ -95,7 +186,17 @@ setup_conda_environment() {
     
     # Activate environment
     print_status "Activating conda environment 'videomae'..."
-    source "$(conda info --base)/etc/profile.d/conda.sh"
+    
+    # Source conda initialization script (handle both existing and newly installed conda)
+    if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+        source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    elif command -v conda &> /dev/null; then
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+    else
+        print_error "Could not find conda initialization script"
+        exit 1
+    fi
+    
     conda activate videomae
     
     # Install conda packages that work better from conda-forge
@@ -119,8 +220,22 @@ install_uv() {
     if ! command -v uv &> /dev/null; then
         print_status "Installing uv..."
         curl -LsSf https://astral.sh/uv/install.sh | sh
+        
+        # Add uv to PATH for current session
         export PATH="$HOME/.cargo/bin:$PATH"
-        source $HOME/.cargo/env
+        
+        # Source cargo environment if it exists
+        if [[ -f "$HOME/.cargo/env" ]]; then
+            source "$HOME/.cargo/env"
+        fi
+        
+        # Verify uv is now available
+        if command -v uv &> /dev/null; then
+            print_status "✅ uv installed successfully!"
+        else
+            print_warning "⚠️  uv installation may not be in PATH. Adding to current session..."
+            export PATH="$HOME/.local/bin:$PATH"
+        fi
     else
         print_status "uv is already installed."
     fi
@@ -131,7 +246,11 @@ install_python_dependencies() {
     print_status "Installing Python dependencies with uv..."
     
     # Ensure we're in the conda environment
-    source "$(conda info --base)/etc/profile.d/conda.sh"
+    if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+        source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    elif command -v conda &> /dev/null; then
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+    fi
     conda activate videomae
     
     # Clean up any existing NumPy 2.x installations that might cause conflicts
@@ -263,7 +382,11 @@ install_python_dependencies() {
 verify_installation() {
     print_status "Verifying installation..."
     
-    source "$(conda info --base)/etc/profile.d/conda.sh"
+    if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+        source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    elif command -v conda &> /dev/null; then
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+    fi
     conda activate videomae
     
     # Clean up any broken installations first
@@ -392,8 +515,16 @@ create_activation_script() {
 
 echo "🎬 Activating VideoMAE environment..."
 
-# Activate conda environment
-source "$(conda info --base)/etc/profile.d/conda.sh"
+# Activate conda environment (handle both existing and newly installed conda)
+if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif command -v conda &> /dev/null; then
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+else
+    echo "❌ Could not find conda installation"
+    exit 1
+fi
+
 conda activate videomae
 
 # Add uv to PATH if needed
@@ -475,6 +606,7 @@ main() {
     print_status "🎉 VideoMAE installation completed successfully!"
     print_status ""
     print_status "📋 Important Notes:"
+    print_status "• Miniconda has been automatically installed (if not already present)"
     print_status "• NumPy has been pinned to 1.x for compatibility with compiled modules"
     print_status "• If you encounter NumPy-related errors, ensure no NumPy 2.x is installed:"
     print_status "  conda activate videomae && pip install 'numpy>=1.21.0,<2.0' --force-reinstall"
@@ -483,6 +615,10 @@ main() {
     print_status "1. Run: source activate_videomae.sh"
     print_status "2. Or manually: conda activate videomae"
     print_status "3. Then you can run finetuning scripts!"
+    print_status ""
+    print_status "💡 If this is a fresh Miniconda installation, you may need to:"
+    print_status "   • Restart your terminal, or"
+    print_status "   • Run: source ~/.bashrc"
     print_status ""
     print_status "Happy training! 🚀"
 }
